@@ -2,6 +2,7 @@
 (function () {
   const C = window.SANCAK_CONFIG;
   const API = 'https://api.jsonbin.io/v3/b/' + C.BIN_ID;
+  const KH = C.MASTER_KEY ? { 'X-Master-Key': C.MASTER_KEY } : { 'X-Access-Key': C.ACCESS_KEY };
 
   // Kurucu sorularının cevap hash'leri (düz yazı değil)
   const FOUNDER_Q = [
@@ -12,12 +13,13 @@
   ];
 
   let DB = null, ME = null, lastLoad = 0, ctl = 1, busy = false, lastSend = 0;
-  let timers = [];
+  let timers = [], cleanups = [];
   const $ = (s) => document.querySelector(s);
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   const now = () => new Date().toISOString();
   const fmt = (d) => new Date(d).toLocaleString('tr-TR');
+  const fmtDay = (d) => new Date(d).toLocaleDateString('tr-TR', { day: 'numeric', month: 'long', year: 'numeric' });
   const safeUrl = (u) => /^(https?:\/\/|img\/)/i.test(u || '');
 
   /* ---------- Güvenli yardımcılar ---------- */
@@ -58,13 +60,13 @@
     return d;
   }
   async function load() {
-    const r = await fetch(API + '/latest', { headers: { 'X-Access-Key': C.ACCESS_KEY, 'X-Bin-Meta': 'false' } });
+    const r = await fetch(API + '/latest', { headers: Object.assign({ 'X-Bin-Meta': 'false' }, KH) });
     if (!r.ok) throw new Error('Veritabanına ulaşılamadı (' + r.status + ')');
     const d = await r.json();
     return ensure(d.record || d);
   }
   async function save(db) {
-    const r = await fetch(API, { method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Access-Key': C.ACCESS_KEY, 'X-Bin-Versioning': 'false' }, body: JSON.stringify(db) });
+    const r = await fetch(API, { method: 'PUT', headers: Object.assign({ 'Content-Type': 'application/json', 'X-Bin-Versioning': 'false' }, KH), body: JSON.stringify(db) });
     if (!r.ok) throw new Error('Kaydedilemedi (' + r.status + ')');
   }
   async function mutate(fn) {
@@ -131,53 +133,95 @@
   const go = (r) => { location.hash = '#/' + r; };
   const empty = (t) => '<p class="muted">' + t + '</p>';
 
+const ICON = { home: '🏠', announcements: '📢', gallery: '🎬', chat: '💬', apply: '📝', about: 'ℹ️', profile: '👤', updates: '🛠️', rules: '📜', staff: '🛡️', socials: '🔗', faq: '❓', support: '🎧', control: '⚙️', security: '🔒' };
+  const tierOf = (lv) => lv >= 16 ? 'founder' : lv >= 10 ? 'admin' : lv >= 7 ? 'lead' : lv >= 1 ? 'mod' : 'member';
+  const rk = (u) => '<span class="rk ' + tierOf(L(u)) + '">' + esc(rankName(u)) + '</span>';
+  const initial = (n) => esc(String(n || '?').charAt(0));
+
+  function rain(cv) {
+    const ctx = cv.getContext('2d');
+    let w, h, drops = [], raf = 0;
+    function size() {
+      w = cv.width = cv.clientWidth; h = cv.height = cv.clientHeight;
+      const n = Math.min(260, Math.round(w * h / 7000));
+      drops = Array.from({ length: n }, () => ({ x: Math.random() * w, y: Math.random() * h, l: 8 + Math.random() * 16, v: 11 + Math.random() * 11 }));
+    }
+    function tick() {
+      ctx.clearRect(0, 0, w, h);
+      ctx.strokeStyle = 'rgba(205,220,255,.3)'; ctx.lineWidth = 1; ctx.beginPath();
+      for (const d of drops) {
+        ctx.moveTo(d.x, d.y); ctx.lineTo(d.x - d.l * 0.18, d.y + d.l);
+        d.y += d.v; d.x -= d.v * 0.18;
+        if (d.y > h) { d.y = -d.l; d.x = Math.random() * (w + 40); }
+      }
+      ctx.stroke(); raf = requestAnimationFrame(tick);
+    }
+    size(); window.addEventListener('resize', size);
+    if (!matchMedia('(prefers-reduced-motion: reduce)').matches) tick();
+    return () => { cancelAnimationFrame(raf); window.removeEventListener('resize', size); };
+  }
+
   function renderNav() {
-    $('#brandName').textContent = DB ? DB.settings.siteName : 'Sancak Roleplay';
+    document.querySelectorAll('.bn').forEach((n) => { n.textContent = DB ? DB.settings.siteName : 'Sancak Roleplay'; });
     if (!DB) { $('#nav').innerHTML = ''; return; }
     const lv = L(ME);
     const cur = (location.hash.replace('#/', '') || 'home').split('/')[0];
     const items = DB.menus.filter((m) => m.public || (ME && lv >= (m.minLevel || 0)));
-    let h = items.map((m) => '<a href="#/' + esc(m.id) + '" class="' + (cur === m.id ? 'on' : '') + '">' + esc(m.name) + '</a>').join('');
-    if (ME) h += '<span class="who">' + esc(ME.username) + ' · ' + esc(rankName(ME)) + '</span><button data-act="logout">Çıkış</button>';
-    else h += '<a href="#/login" class="' + (cur === 'login' ? 'on' : '') + '">Giriş</a><a href="#/register" class="' + (cur === 'register' ? 'on' : '') + '">Kayıt ol</a>';
-    $('#nav').innerHTML = h;
+    $('#nav').innerHTML = items.map((m) => '<a href="#/' + esc(m.id) + '" class="' + (cur === m.id ? 'on' : '') + '"><i>' + (ICON[m.id] || '•') + '</i>' + esc(m.name) + '</a>').join('');
+    const tier = tierOf(lv);
+    $('#sideUser').innerHTML = ME
+      ? '<div class="ucard"><i class="av ' + tier + '">' + initial(ME.username) + '</i><div><b>' + esc(ME.username) + '</b>' + rk(ME) + '</div><button class="btn sm alt" data-act="logout">Çıkış</button></div>'
+      : '<a class="btn" href="#/login">Giriş yap</a><a class="btn alt" href="#/register">Kayıt ol</a>';
+    $('#mUser').innerHTML = ME ? '<a href="#/profile" style="text-decoration:none"><i class="av ' + tier + '">' + initial(ME.username) + '</i></a>' : '<a class="btn sm" href="#/login">Giriş</a>';
+    const tabs = ME
+      ? [['home', '🏠', 'Ana sayfa'], ['chat', '💬', 'Sohbet'], [lv > 0 ? 'staff' : 'apply', lv > 0 ? '🛡️' : '📝', lv > 0 ? 'Kadro' : 'Başvuru'], ['profile', '👤', 'Profil']]
+      : [['home', '🏠', 'Ana sayfa'], ['login', '🔑', 'Giriş'], ['register', '✨', 'Kayıt']];
+    $('#tabbar').innerHTML = tabs.map((t) => '<a href="#/' + t[0] + '" class="' + (cur === t[0] ? 'on' : '') + '"><i>' + t[1] + '</i><span>' + t[2] + '</span></a>').join('') + '<button data-act="nav"><i>☰</i><span>Menü</span></button>';
     $('#notice').innerHTML = DB.settings.maintenance ? '<div class="bar">Site bakım modunda. Sadece yetkililer tüm sayfalara erişebilir.</div>' : '';
   }
 
-  /* ---------- Sayfalar ---------- */
+    /* ---------- Sayfalar ---------- */
   const P = {}, POST = {};
 
-  P.home = () => {
+P.home = () => {
     const bn = DB.banners.filter((b) => safeUrl(b.img));
-    const slides = bn.map((b, i) => '<img class="slide' + (i === 0 ? ' on' : '') + '" src="' + esc(b.img) + '" alt="' + esc(b.title) + '">').join('');
-    const ann = DB.announcements.slice().reverse().slice(0, 5).map((a) => '<div class="card"><h3>' + esc(a.title) + '</h3><time>' + fmt(a.t) + '</time><p>' + esc(a.body) + '</p></div>').join('') || empty('Henüz duyuru yok.');
-    return '<div class="hero">' + slides + '<div class="txt"><h1>' + esc(DB.settings.siteName) + '</h1><p>İstanbul\'un gecesinde yeni bir hikâye başlıyor. Rolünü seç, şehre katıl.</p>' +
-      (ME ? '' : '<a class="btn" href="#/register">Kayıt ol</a> <a class="btn alt" href="#/login">Giriş yap</a>') + '</div></div>' +
-      '<section class="blk"><h2>Duyurular</h2>' + ann + '</section>' +
-      '<section class="blk"><h2>Oyundan kesitler</h2>' + galleryHtml() + '</section>' +
-      (ME ? '' : '<p class="muted">Diğer bölümleri görmek için giriş yapman gerekiyor.</p>');
+    const slides = bn.map((b, i) => '<img class="slide' + (i === 0 ? ' on' : '') + '" src="' + esc(b.img) + '" alt="">').join('');
+    const ann = DB.announcements.slice().reverse().slice(0, 4).map((a, i) => '<article class="tli"><time>' + (i === 0 ? '<em>Yeni</em>' : '') + fmtDay(a.t) + '</time><div><h3>' + esc(a.title) + '</h3><p>' + esc(a.body) + '</p></div></article>').join('') || empty('Henüz duyuru yok.');
+    const soc = DB.socials.filter((x) => safeUrl(x.url)).map((x) => '<a class="chip" href="' + esc(x.url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.name) + '</a>').join('');
+    return '<section class="hero">' + slides + '<canvas class="rain"></canvas><div class="siren"></div><div class="hcont"><h1>Sancak<span>Roleplay</span></h1><p>Boğaz\'ın gecesinde, yağmurun altında yeni bir şehir. Rolünü seç, sirenleri sen duy.</p><div class="cta">' +
+      (ME ? '<a class="btn" href="#/chat">Sohbete gir</a><a class="btn alt" href="#/apply">Yetkili başvurusu</a>' : '<a class="btn" href="#/register">Hemen kayıt ol</a><a class="btn alt" href="#/login">Giriş yap</a>') + '</div></div></section>' +
+      '<section class="blk"><div class="sechead"><h2>Duyurular</h2><a href="#/announcements">Tümünü gör</a></div>' + ann + '</section>' +
+      '<section class="blk"><div class="sechead"><h2>Oyundan kesitler</h2></div>' + galleryHtml() + '</section>' +
+      '<section class="join"><div><h2>Şehre katıl</h2><p>' + (ME ? 'Bizi sosyal medyadan takip et.' : 'Diğer bölümler için giriş yapman gerekiyor.') + '</p></div><div class="chips">' + (soc || '') + '</div></section>';
   };
   POST.home = () => {
     const s = document.querySelectorAll('.hero .slide');
-    if (s.length > 1) { let i = 0; timers.push(setInterval(() => { s[i].classList.remove('on'); i = (i + 1) % s.length; s[i].classList.add('on'); }, 5000)); }
+    if (s.length > 1) { let i = 0; timers.push(setInterval(() => { s[i].classList.remove('on'); i = (i + 1) % s.length; s[i].classList.add('on'); }, 5500)); }
+    const cv = document.querySelector('.rain');
+    if (cv) cleanups.push(rain(cv));
   };
   function galleryHtml() {
     const g = DB.gallery.filter((x) => safeUrl(x.img));
-    return g.length ? '<div class="grid">' + g.map((x) => '<button class="card shot" data-act="zoom" data-src="' + esc(x.img) + '"><img loading="lazy" src="' + esc(x.img) + '" alt="' + esc(x.title) + '"><span>' + esc(x.title) + '</span></button>').join('') + '</div>' : empty('Henüz görsel yok.');
+    return g.length ? '<div class="gal">' + g.map((x) => '<button class="shot" data-act="zoom" data-src="' + esc(x.img) + '"><img loading="lazy" src="' + esc(x.img) + '" alt="' + esc(x.title) + '"><span>' + esc(x.title) + '</span></button>').join('') + '</div>' : empty('Henüz görsel yok.');
   }
-  P.announcements = () => '<h2>Duyurular</h2>' + (DB.announcements.slice().reverse().map((a) => '<div class="card"><h3>' + esc(a.title) + '</h3><time>' + fmt(a.t) + '</time><p>' + esc(a.body) + '</p></div>').join('') || empty('Henüz duyuru yok.'));
+  P.announcements = () => '<h2>Duyurular</h2>' + (DB.announcements.slice().reverse().map((a) => '<article class="tli"><time>' + fmtDay(a.t) + '</time><div><h3>' + esc(a.title) + '</h3><p>' + esc(a.body) + '</p></div></article>').join('') || empty('Henüz duyuru yok.'));
   P.gallery = () => '<h2>Oyundan kesitler</h2>' + galleryHtml();
-  P.about = () => '<h2>Hakkımızda</h2><div class="card rules">' + esc(DB.about) + '</div>';
+    P.about = () => '<h2>Hakkımızda</h2><div class="card rules">' + esc(DB.about) + '</div>';
   P.rules = () => '<h2>Kurallar</h2><div class="card rules">' + esc(DB.rules) + '</div>';
   P.updates = () => '<h2>Güncellemeler</h2>' + (DB.updates.slice().reverse().map((u) => '<div class="card"><h3>' + esc(u.title) + '</h3><p class="rules">' + esc(u.body) + '</p></div>').join('') || empty('Henüz güncelleme notu yok.'));
   P.faq = () => '<h2>Sık sorulan sorular</h2>' + (DB.faq.map((f) => '<div class="card"><h3>' + esc(f.q) + '</h3><p class="rules">' + esc(f.a) + '</p></div>').join('') || empty('Henüz soru eklenmedi.'));
   P.socials = () => '<h2>Sosyal medya</h2>' + (DB.socials.filter((s) => safeUrl(s.url)).map((s) => '<div class="card"><h3>' + esc(s.name) + '</h3><a href="' + esc(s.url) + '" target="_blank" rel="noopener noreferrer">' + esc(s.url) + '</a></div>').join('') || empty('Henüz bağlantı eklenmedi.'));
-  P.staff = () => {
-    const st = DB.users.filter((u) => u.rankId && !u.banned).sort((a, b) => L(b) - L(a));
-    return '<h2>Yetkili kadrosu</h2>' + (st.length ? '<div class="card wrapx"><table><tr><th>Kullanıcı</th><th>Rütbe</th><th>Discord</th></tr>' + st.map((u) => '<tr><td>' + esc(u.username) + '</td><td>' + esc(rankName(u)) + '</td><td>' + esc(u.discord || '-') + '</td></tr>').join('') + '</table></div>' : empty('Henüz yetkili yok.'));
+P.staff = () => {
+    const out = DB.ranks.slice().sort((a, b) => b.level - a.level).map((r) => {
+      const us = DB.users.filter((u) => u.rankId === r.id && !u.banned);
+      if (!us.length) return '';
+      const t = tierOf(r.level);
+      return '<h3 class="gh ' + t + '">' + esc(r.name) + '</h3><div class="people">' + us.map((u) => '<div class="person"><i class="av ' + t + '">' + initial(u.username) + '</i><div><b>' + esc(u.username) + '</b><small>' + esc(u.discord || '') + '</small></div></div>').join('') + '</div>';
+    }).join('');
+    return '<h2>Yetkili kadrosu</h2>' + (out || empty('Henüz yetkili yok.'));
   };
 
-  P.login = () => ME ? '<p>Zaten giriş yaptın.</p>' : '<div class="tabs"><a class="btn" href="#/login">Giriş</a><a class="btn alt" href="#/register">Kayıt ol</a></div><div class="card form"><h2>Giriş yap</h2><form data-form="login"><label>Kullanıcı adı</label><input name="username" required autocomplete="username"><label>Şifre</label><input name="password" type="password" required autocomplete="current-password"><p><button class="btn">Giriş yap</button></p></form></div>';
+    P.login = () => ME ? '<p>Zaten giriş yaptın.</p>' : '<div class="tabs"><a class="btn" href="#/login">Giriş</a><a class="btn alt" href="#/register">Kayıt ol</a></div><div class="card form"><h2>Giriş yap</h2><form data-form="login"><label>Kullanıcı adı</label><input name="username" required autocomplete="username"><label>Şifre</label><input name="password" type="password" required autocomplete="current-password"><p><button class="btn">Giriş yap</button></p></form></div>';
   P.register = () => ME ? '<p>Zaten giriş yaptın.</p>' : '<div class="tabs"><a class="btn alt" href="#/login">Giriş</a><a class="btn" href="#/register">Kayıt ol</a></div><div class="card form"><h2>Kayıt ol</h2><form data-form="register"><label>Kullanıcı adı (3-20, harf/rakam/_/.)</label><input name="username" required maxlength="20" autocomplete="username"><label>Discord adın (isteğe bağlı)</label><input name="discord" maxlength="40"><label>Şifre (en az 6 karakter)</label><input name="password" type="password" required autocomplete="new-password"><label>Şifre tekrar</label><input name="password2" type="password" required autocomplete="new-password"><p><button class="btn">Kayıt ol</button></p></form></div>';
 
   P.profile = () => {
@@ -188,16 +232,20 @@
       (w ? '<div class="card"><h3>Uyarıların</h3><ul>' + w + '</ul></div>' : '');
   };
 
-  P.chat = () => '<h2>Sohbet</h2><p class="muted">Sohbet ' + DB.settings.chatLimit + ' mesajda bir sıfırlanır.</p><div class="chat" id="chatbox"></div><form class="chatform" data-form="chat"><input name="text" maxlength="300" placeholder="Mesajın…" autocomplete="off" required><button class="btn">Gönder</button></form>';
+P.chat = () => '<h2>Sohbet</h2><p class="muted">Sohbet ' + DB.settings.chatLimit + ' mesajda bir sıfırlanır.</p><div class="chat" id="chatbox"></div><form class="chatform" data-form="chat"><input name="text" maxlength="300" placeholder="Mesajını yaz…" autocomplete="off" required><button class="btn">Gönder</button></form>';
   POST.chat = () => { drawChat(); timers.push(setInterval(async () => { if (document.hidden) return; try { DB = await load(); lastLoad = Date.now(); syncMe(); drawChat(); } catch (e) { /* sessiz */ } }, 15000)); };
   function drawChat() {
     const b = $('#chatbox'); if (!b) return;
-    const bottom = b.scrollHeight - b.scrollTop - b.clientHeight < 60;
-    b.innerHTML = DB.chat.map((m) => m.sys ? '<div class="msg sys">' + esc(m.text) + '</div>' : '<div class="msg"><b>' + esc(m.name) + '</b> <small>' + esc(m.rank) + ' · ' + new Date(m.t).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) + '</small><br>' + esc(m.text) + '</div>').join('') || '<p class="muted">İlk mesajı sen yaz.</p>';
+    const bottom = b.scrollHeight - b.scrollTop - b.clientHeight < 80;
+    b.innerHTML = DB.chat.map((m) => {
+      if (m.sys) return '<div class="msg sys">' + esc(m.text) + '</div>';
+      const r = DB.ranks.find((x) => x.name === m.rank), t = tierOf(r ? r.level : 0);
+      return '<div class="msg' + (ME && m.uid === ME.id ? ' me' : '') + '"><i class="av ' + t + '">' + initial(m.name) + '</i><div class="bub"><div class="who"><b>' + esc(m.name) + '</b><span class="rk ' + t + '">' + esc(m.rank) + '</span><small>' + new Date(m.t).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }) + '</small></div>' + esc(m.text) + '</div></div>';
+    }).join('') || '<p class="muted">İlk mesajı sen yaz.</p>';
     if (bottom || !b.dataset.init) { b.scrollTop = b.scrollHeight; b.dataset.init = '1'; }
   }
 
-  P.apply = () => {
+    P.apply = () => {
     if (L(ME) > 0) return '<h2>Yetkili başvurusu</h2><p>Zaten yetkilisin.</p>';
     const mine = DB.applications.filter((a) => a.userId === ME.id).reverse();
     const pend = mine.find((a) => a.status === 'pending');
@@ -445,7 +493,7 @@
 
   /* ---------- Tıklama eylemleri ---------- */
   const ACT = {};
-  ACT.nav = () => $('#nav').classList.toggle('open');
+  ACT.nav = () => document.body.classList.toggle('menu');
   ACT.close = () => closeModal();
   ACT.zoom = (el) => { if (safeUrl(el.dataset.src)) modal('<img class="big" src="' + esc(el.dataset.src) + '" alt=""><p><button class="btn alt" data-act="close">Kapat</button></p>'); };
   ACT.logout = () => { localStorage.removeItem('sk_session'); ME = null; renderNav(); go('home'); route(); };
@@ -501,11 +549,12 @@
 
   document.addEventListener('click', (e) => {
     if (e.target.id === 'modal') return closeModal();
+    if (e.target.closest('#side a, #tabbar a')) document.body.classList.remove('menu');
     const el = e.target.closest('[data-act]');
     if (!el) return;
     const fn = ACT[el.dataset.act];
     if (fn) { try { const r = fn(el, e); if (r && r.catch) r.catch((x) => toast(x.message)); } catch (x) { toast(x.message); } }
-    if (el.dataset.act !== 'nav') $('#nav').classList.remove('open');
+    if (el.dataset.act !== 'nav') document.body.classList.remove('menu');
   });
   document.addEventListener('submit', async (e) => {
     const f = e.target.closest('form[data-form]');
@@ -521,9 +570,10 @@
   /* ---------- Yönlendirme ---------- */
   async function route() {
     timers.forEach(clearInterval); timers = [];
+    cleanups.forEach((f) => f()); cleanups = [];
     const r = (location.hash.replace('#/', '') || 'home').split('/')[0];
     const app = $('#app');
-    try { await refresh(r === 'control' || r === 'security'); } catch (e) { app.innerHTML = '<div class="card"><h3>Bağlantı hatası</h3><p>' + esc(e.message) + '</p><p class="muted">config.js içindeki Bin ID ve Access Key\'i kontrol et.</p></div>'; return; }
+    try { await refresh(r === 'control' || r === 'security'); } catch (e) { app.innerHTML = '<div class="card"><h3>Bağlantı hatası</h3><p>' + esc(e.message) + '</p><p class="muted">config.js içindeki Bin ID ve Access Key\'i kontrol et. (401 = key yanlış ya da Access Key\'in Read/Update izni yok.)</p></div>'; return; }
     renderNav();
     const menu = DB.menus.find((m) => m.id === r);
     const open = ['login', 'register'].includes(r) || (menu && menu.public);
